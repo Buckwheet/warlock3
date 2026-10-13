@@ -43,10 +43,11 @@ data class LaunchRequest(
 
     companion object {
         fun fromPayload(line: String): LaunchRequest {
-            if (line.isBlank()) return LaunchRequest()
-            val map = line.split('&').filter { it.contains('=') }.associate {
+            val cleanLine = line.trim().removePrefix("\uFEFF")
+            if (cleanLine.isBlank()) return LaunchRequest()
+            val map = cleanLine.split('&').filter { it.contains('=') }.associate {
                 val parts = it.split('=', limit = 2)
-                parts[0] to URLDecoder.decode(parts[1], "UTF-8")
+                parts[0].trim().removePrefix("\uFEFF") to URLDecoder.decode(parts[1].trim(), "UTF-8")
             }
             return LaunchRequest(
                 autoConnectName = map["autoConnectName"],

@@ -182,6 +182,25 @@ private class WarlockCommand : CliktCommand() {
 
         val logger = configureLogging()
 
+        val appDirs = AppDirs { appName = "warlock"; appAuthor = "WarlockFE" }
+        val portFile = File(appDirs.getUserDataDir(), "single_instance.port")
+        val launchRequest = LaunchRequest(
+            autoConnectName = autoConnectName,
+            width = width,
+            height = height,
+            positionX = positionX,
+            positionY = positionY,
+            host = host,
+            port = port,
+            key = key,
+            salFile = salFile,
+            exitOnDisconnect = exitOnDisconnect,
+        )
+
+        if (singleInstance && SingleInstanceHelper.tryDelegateToExisting(portFile, launchRequest, logger)) {
+            exitProcess(0)
+        }
+
         FileKit.init("warlock")
 
         val credentials = parseCredentials(logger)
@@ -223,25 +242,6 @@ private class WarlockCommand : CliktCommand() {
                 certificate = simuCert,
                 secure = sgeSecure,
             )
-
-        val appDirs = AppDirs { appName = "warlock"; appAuthor = "WarlockFE" }
-        val portFile = File(appDirs.getUserDataDir(), "single_instance.port")
-        val launchRequest = LaunchRequest(
-            autoConnectName = autoConnectName,
-            width = width,
-            height = height,
-            positionX = positionX,
-            positionY = positionY,
-            host = host,
-            port = port,
-            key = key,
-            salFile = salFile,
-            exitOnDisconnect = exitOnDisconnect,
-        )
-
-        if (singleInstance && SingleInstanceHelper.tryDelegateToExisting(portFile, launchRequest, logger)) {
-            exitProcess(0)
-        }
 
         val games =
             mutableStateListOf<GameState>().apply {
