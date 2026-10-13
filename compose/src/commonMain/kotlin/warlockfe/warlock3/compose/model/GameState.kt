@@ -7,6 +7,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import warlockfe.warlock3.compose.ui.game.GameViewModel
 
+data class WindowBounds(
+    val width: Int? = null,
+    val height: Int? = null,
+    val positionX: Int? = null,
+    val positionY: Int? = null,
+)
+
 class GameState {
     var screen by mutableStateOf<GameScreen>(GameScreen.Dashboard)
         private set
@@ -15,6 +22,9 @@ class GameState {
     // attempt has been consumed (or pre-set true for windows that should never auto-connect, e.g. a
     // window already connected via the command line, or a manually opened additional window).
     var autoConnectAttempted: Boolean = false
+
+    var initialBounds: WindowBounds? = null
+    var exitOnDisconnect: Boolean = false
 
     suspend fun setScreen(screen: GameScreen) {
         withContext(Dispatchers.Main.immediate) {

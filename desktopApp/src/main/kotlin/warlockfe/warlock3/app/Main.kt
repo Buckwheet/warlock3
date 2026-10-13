@@ -101,6 +101,8 @@ import warlockfe.warlock3.compose.generated.resources.Res
 import warlockfe.warlock3.compose.generated.resources.app_icon
 import warlockfe.warlock3.compose.model.GameScreen
 import warlockfe.warlock3.compose.model.GameState
+import warlockfe.warlock3.compose.model.WindowBounds
+import javax.swing.SwingUtilities
 import warlockfe.warlock3.compose.observeSkin
 import warlockfe.warlock3.compose.openPrefsDatabase
 import warlockfe.warlock3.compose.util.LocalSkin
@@ -165,6 +167,10 @@ private class WarlockCommand : CliktCommand() {
         "--exit-on-disconnect",
         help = "Exit the client when the game connection disconnects",
     ).flag()
+    val singleInstance: Boolean by option(
+        "--single-instance",
+        help = "Delegate window creation to existing instance if running",
+    ).boolean().default(true)
 
     @OptIn(FlowPreview::class, ExperimentalFoundationApi::class)
     override fun run() {
@@ -218,10 +224,48 @@ private class WarlockCommand : CliktCommand() {
                 secure = sgeSecure,
             )
 
+        val appDirs = AppDirs { appName = "warlock"; appAuthor = "WarlockFE" }
+        val portFile = File(appDirs.getUserDataDir(), "single_instance.port")
+        val launchRequest = LaunchRequest(
+            autoConnectName = autoConnectName,
+            width = width,
+            height = height,
+            positionX = positionX,
+            positionY = positionY,
+            host = host,
+            port = port,
+            key = key,
+            salFile = salFile,
+            exitOnDisconnect = exitOnDisconnect,
+        )
+
+        if (singleInstance && SingleInstanceHelper.tryDelegateToExisting(portFile, launchRequest, logger)) {
+            exitProcess(0)
+        }
+
         val games =
             mutableStateListOf<GameState>().apply {
-                addAll(createInitialGameStates(appContainer, credentials, sgeSettings, logger))
+                val initialList = createInitialGameStates(appContainer, credentials, sgeSettings, logger)
+                initialList.firstOrNull()?.let {
+                    it.initialBounds = WindowBounds(
+                        width = width,
+                        height = height,
+                        positionX = positionX,
+                        positionY = positionY,
+                    )
+                    it.exitOnDisconnect = exitOnDisconnect
+                }
+                addAll(initialList)
             }
+
+        if (singleInstance) {
+            SingleInstanceHelper.startServer(portFile, logger) { req ->
+                SwingUtilities.invokeLater {
+                    val nextGameState = createGameStateFromRequest(req, appContainer, sgeSettings, logger)
+                    games.add(nextGameState)
+                }
+            }
+        }
 
         val updater = buildUpdater(clientSettings)
         val updateSupported = updater.isUpdateSupported()
@@ -341,12 +385,22 @@ private class WarlockCommand : CliktCommand() {
 
                 games.forEach { gameState ->
                     key(gameState) {
+                        val winBounds = gameState.initialBounds
+                        val windowWidth = winBounds?.width ?: initialWidth
+                        val windowHeight = winBounds?.height ?: initialHeight
+                        val posX = winBounds?.positionX
+                        val posY = winBounds?.positionY
+                        val windowPos = if (posX != null && posY != null) {
+                            WindowPosition(posX.dp, posY.dp)
+                        } else {
+                            position
+                        }
                         val windowState =
                             remember {
                                 WindowState(
-                                    width = initialWidth.dp,
-                                    height = initialHeight.dp,
-                                    position = position,
+                                    width = windowWidth.dp,
+                                    height = windowHeight.dp,
+                                    position = windowPos,
                                 )
                             }
                         // Where this window's game screen publishes its dock state. Detached game
@@ -377,7 +431,7 @@ private class WarlockCommand : CliktCommand() {
                                 }
                             }
                         }
-                        if (exitOnDisconnect) {
+                        if (exitOnDisconnect || gameState.exitOnDisconnect) {
                             // Close the window as soon as its connection drops (e.g. an input file
                             // replayed to EOF) instead of showing the reconnect banner.
                             val disconnectedFlow = connectedScreen?.viewModel?.disconnected ?: flowOf(false)
@@ -428,9 +482,7 @@ private class WarlockCommand : CliktCommand() {
                                     sgeSettings = sgeSettings,
                                 )
                                 LaunchedEffect(windowState, connectedCharacter?.id) {
-                                    // A window size passed on the command line should win, so don't clobber it
-                                    // with the saved per-character size when a character connects.
-                                    if (width != null || height != null) return@LaunchedEffect
+                                    if (width != null || height != null || winBounds?.width != null || winBounds?.height != null) return@LaunchedEffect
                                     val characterId = connectedCharacter?.id ?: return@LaunchedEffect
                                     val bounds =
                                         appContainer.characterSettingsRepository
@@ -730,26 +782,25 @@ private class WarlockCommand : CliktCommand() {
             }
         }
 
-    /** Build a [GameState] auto-connected to the named CLI connection via SGE. */
     private fun createAutoConnectGameState(
         appContainer: AppContainer,
         sgeSettings: SgeSettings,
+        connectionName: String = autoConnectName!!,
     ): GameState =
         GameState().apply {
             // Connecting to a named connection from the CLI; skip last-connection auto-connect.
             autoConnectAttempted = true
             runBlocking {
-                val connection = appContainer.connectionRepository.getByName(autoConnectName!!)
+                val connection = appContainer.connectionRepository.getByName(connectionName)
                 if (connection == null) {
-                    println("Invalid connection name: $autoConnectName")
-                    exitProcess(-1)
+                    println("Invalid connection name: $connectionName")
+                    return@runBlocking
                 }
                 // A telnet MUD needs no login server: dial it and open the game screen.
                 if (connection.protocol == ConnectionProtocol.TELNET) {
                     val result = appContainer.connectToTelnetUseCase(connection, this@apply)
                     if (result is TelnetConnectResult.Failure) {
                         println(result.message)
-                        exitProcess(-1)
                     }
                     return@runBlocking
                 }
@@ -759,7 +810,6 @@ private class WarlockCommand : CliktCommand() {
                 when (result) {
                     is AutoConnectResult.Failure -> {
                         println(result.reason)
-                        exitProcess(-1)
                     }
 
                     is AutoConnectResult.Success -> {
@@ -773,12 +823,57 @@ private class WarlockCommand : CliktCommand() {
                         } catch (e: Exception) {
                             ensureActive()
                             println("Error connecting to server: ${e.message}")
-                            exitProcess(-1)
                         }
                     }
                 }
             }
         }
+
+    private fun createGameStateFromRequest(
+        request: LaunchRequest,
+        appContainer: AppContainer,
+        sgeSettings: SgeSettings,
+        logger: Logger,
+    ): GameState {
+        val creds = if (request.salFile != null) {
+            val file = File(request.salFile)
+            if (file.exists()) {
+                try {
+                    parseSalCredentials(file.readText())
+                } catch (e: Exception) {
+                    logger.e(e) { "Failed to parse .sal file: ${request.salFile}" }
+                    null
+                }
+            } else null
+        } else if (request.port != null && request.host != null && request.key != null) {
+            SimuGameCredentials(host = request.host, port = request.port, key = request.key)
+        } else {
+            null
+        }
+
+        val state = when {
+            creds != null -> {
+                connectSocketGameState(appContainer, key = creds.key, logger) {
+                    NetworkSocket(Dispatchers.IO).also { socket ->
+                        socket.connect(creds.host, creds.port)
+                    }
+                }
+            }
+            request.autoConnectName != null -> {
+                createAutoConnectGameState(appContainer, sgeSettings, request.autoConnectName)
+            }
+            else -> GameState()
+        }
+
+        state.initialBounds = WindowBounds(
+            width = request.width,
+            height = request.height,
+            positionX = request.positionX,
+            positionY = request.positionY,
+        )
+        state.exitOnDisconnect = request.exitOnDisconnect
+        return state
+    }
 
     private fun buildUpdater(clientSettings: ClientSettingRepository): ChannelUpdater {
         val resolvedVersion = version ?: "0.0.0"

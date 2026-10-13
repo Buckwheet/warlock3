@@ -133,6 +133,13 @@ potassium {
     // the release that carries it. TODO: remove when Jewel 0.41 ships.
     jvmArgs += "--sun-misc-unsafe-memory-access=allow"
 
+    // Memory footprint optimizations: prevent default 512MB initial / 8GB max heap
+    jvmArgs += "-Xms48m"
+    jvmArgs += "-Xmx256m"
+    jvmArgs += "-XX:+UseG1GC"
+    jvmArgs += "-XX:MinHeapFreeRatio=15"
+    jvmArgs += "-XX:MaxHeapFreeRatio=30"
+
     // Opt-in GC + safepoint logging for diagnosing stream-render stalls:
     //   ./gradlew :desktopApp:run -PgcLog
     // Writes per-pid logs (so multiple connections/processes don't collide) under the build dir with
